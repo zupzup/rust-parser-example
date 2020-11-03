@@ -5,4 +5,4 @@ authors = ["Mario Zupan <mario@zupzup.org>"]
 edition = "2018"
 
 [dependencies]
-nom = "5.1"
+nom = "6.0"
