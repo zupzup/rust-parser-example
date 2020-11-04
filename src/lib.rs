@@ -126,19 +126,37 @@ where
 // only IPv4
 fn ip(input: &str) -> IResult<&str, String> {
     tuple((
-        count(
-            terminated(many_m_n(1, 3, one_of("0123456789")), tag(".")),
-            3,
-        ),
-        many_m_n(1, 3, one_of("0123456789")), // TODO: build one_digit parser
+        count(terminated(many_m_n(1, 3, one_digit), tag(".")), 3),
+        many_m_n(1, 3, one_digit),
     ))(input)
     .and_then(|(next_input, res)| {
-        let mut first_three: Vec<String> = res.0.into_iter().flatten().collect::<Vec<String>>(); // TODO: FIXME
+        let mut result: Vec<String> = res
+            .0
+            .into_iter()
+            .map(|chars| chars.into_iter().collect::<String>())
+            .collect();
         let last: String = res.1.into_iter().collect::<String>();
-        first_three.push(last);
+        result.push(last);
+        for num in &result {
+            match num.parse::<usize>() {
+                Ok(n) => {
+                    if n > 255 {
+                        return Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit)));
+                    }
+                }
+                Err(_) => return Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))),
+            };
+        }
+        let ip = result.join(".");
 
-        Ok((next_input, first_three.join(".")))
+        Ok((next_input, ip))
     })
+}
+
+// TODO: parser for up_to_three_digits
+// TODO: parser which checks if it's a valid usize and >255 etc.
+fn one_digit(input: &str) -> IResult<&str, char> {
+    one_of("0123456789")(input)
 }
 
 fn request_method(input: &str) -> IResult<&str, Method> {
@@ -224,20 +242,22 @@ fn test_ipv4() {
     assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", "0.0.0.0".to_string())));
     assert_eq!(
         ip("1924.168.0.1:8080"),
-        Err(NomErr::Error(Error::new(
-            ".168.0.1:8080",
-            ErrorKind::AlphaNumeric
-        )))
+        Err(NomErr::Error(Error::new("4.168.0.1:8080", ErrorKind::Tag)))
+    );
+    assert_eq!(
+        ip("192.168.0000.144:8080"),
+        Err(NomErr::Error(Error::new("0.144:8080", ErrorKind::Tag)))
     );
     assert_eq!(
         ip("192.168.0.1444:8080"),
-        Err(NomErr::Error(Error::new(
-            "1444:8080",
-            ErrorKind::AlphaNumeric
-        )))
+        Ok(("4:8080", "192.168.0.144".to_string()))
     );
     assert_eq!(
         ip("192.168.0:8080"),
-        Err(NomErr::Error(Error::new("0:8080", ErrorKind::AlphaNumeric)))
+        Err(NomErr::Error(Error::new(":8080", ErrorKind::Tag)))
+    );
+    assert_eq!(
+        ip("999.168.0.0:8080"),
+        Err(NomErr::Error(Error::new(":8080", ErrorKind::Digit)))
     );
 }
