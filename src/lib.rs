@@ -12,6 +12,7 @@ use nom::{
     error::Error,
     error::ErrorKind,
     multi::{count, many0, many1, many_m_n, separated_list1},
+    number::complete::u8 as nom_u8,
     sequence::{pair, separated_pair, terminated, tuple},
     AsChar, Err as NomErr, IResult, InputTakeAtPosition,
 };
@@ -124,37 +125,30 @@ where
 }
 
 // only IPv4
-fn ip(input: &str) -> IResult<&str, String> {
-    tuple((
-        count(terminated(many_m_n(1, 3, one_digit), tag(".")), 3),
-        many_m_n(1, 3, one_digit),
-    ))(input)
-    .and_then(|(next_input, res)| {
-        let mut result: Vec<String> = res
-            .0
+fn ip(input: &str) -> IResult<&str, [u8; 4]> {
+    tuple((count(terminated(ip_num, tag(".")), 3), ip_num))(input).and_then(|(next_input, res)| {
+        let mut result: [u8; 4] = [0, 0, 0, 0];
+        res.0
             .into_iter()
-            .map(|chars| chars.into_iter().collect::<String>())
-            .collect();
-        let last: String = res.1.into_iter().collect::<String>();
-        result.push(last);
-        for num in &result {
-            match num.parse::<usize>() {
-                Ok(n) => {
-                    if n > 255 {
-                        return Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit)));
-                    }
-                }
-                Err(_) => return Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))),
-            };
-        }
-        let ip = result.join(".");
-
-        Ok((next_input, ip))
+            .enumerate()
+            .for_each(|(i, v)| result[i] = v);
+        result[3] = res.1;
+        Ok((next_input, result))
     })
 }
 
-// TODO: parser for up_to_three_digits
-// TODO: parser which checks if it's a valid usize and >255 etc.
+fn ip_num(input: &str) -> IResult<&str, u8> {
+    one_to_three_digits(input).and_then(|(next_input, result)| match result.parse::<u8>() {
+        Ok(n) => Ok((next_input, n)),
+        Err(_) => Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))),
+    })
+}
+
+fn one_to_three_digits(input: &str) -> IResult<&str, String> {
+    many_m_n(1, 3, one_digit)(input)
+        .and_then(|(next_input, result)| Ok((next_input, result.into_iter().collect())))
+}
+
 fn one_digit(input: &str) -> IResult<&str, char> {
     one_of("0123456789")(input)
 }
@@ -235,11 +229,8 @@ fn test_host() {
 
 #[test]
 fn test_ipv4() {
-    assert_eq!(
-        ip("192.168.0.1:8080"),
-        Ok((":8080", "192.168.0.1".to_string()))
-    );
-    assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", "0.0.0.0".to_string())));
+    assert_eq!(ip("192.168.0.1:8080"), Ok((":8080", [192, 168, 0, 1])));
+    assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", [0, 0, 0, 0])));
     assert_eq!(
         ip("1924.168.0.1:8080"),
         Err(NomErr::Error(Error::new("4.168.0.1:8080", ErrorKind::Tag)))
@@ -250,7 +241,7 @@ fn test_ipv4() {
     );
     assert_eq!(
         ip("192.168.0.1444:8080"),
-        Ok(("4:8080", "192.168.0.144".to_string()))
+        Ok(("4:8080", [192, 168, 0, 144]))
     );
     assert_eq!(
         ip("192.168.0:8080"),
@@ -258,6 +249,6 @@ fn test_ipv4() {
     );
     assert_eq!(
         ip("999.168.0.0:8080"),
-        Err(NomErr::Error(Error::new(":8080", ErrorKind::Digit)))
+        Err(NomErr::Error(Error::new(".168.0.0:8080", ErrorKind::Digit)))
     );
 }
