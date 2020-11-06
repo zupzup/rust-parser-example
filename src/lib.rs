@@ -29,6 +29,13 @@ enum Method {
     TRACE,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Host {
+    HOST(String),
+    IP([u8; 4]),
+    ASTERISK,
+}
+
 impl From<&str> for Method {
     fn from(i: &str) -> Self {
         match i.to_uppercase().as_str() {
@@ -65,7 +72,7 @@ impl From<&str> for Scheme {
 struct URI {
     scheme: Scheme,
     authority: Option<(Option<String>, Option<String>)>, // username & password
-    host: String,
+    host: Host,
     port: Option<u16>,
     path: Option<String>,
     query: Option<Vec<(String, String)>>,
@@ -91,7 +98,7 @@ fn authority(input: &str) -> IResult<&str, Option<(&str, Option<&str>)>> {
 
 // fn host_or_ip(input: &str) -> IResult<&str, String> {}
 
-fn host(input: &str) -> IResult<&str, String> {
+fn host(input: &str) -> IResult<&str, Host> {
     alt((
         tuple((many1(terminated(alphanumerichyphen1, tag("."))), alpha1)),
         tuple((many_m_n(1, 1, alphanumerichyphen1), take(0 as usize))),
@@ -101,7 +108,7 @@ fn host(input: &str) -> IResult<&str, String> {
         if !res.1.is_empty() {
             res.0.push(res.1);
         }
-        Ok((next_input, res.0.join(".")))
+        Ok((next_input, Host::HOST(res.0.join("."))))
     })
 }
 
@@ -113,19 +120,18 @@ where
     i.split_at_position1_complete(
         |item| {
             let char_item = item.as_char();
-            // println!(
-            //     "char: {} res: {}",
-            //     char_item,
-            //     !(char_item == '-') && !char_item.is_alphanum()
-            // );
             !(char_item == '-') && !char_item.is_alphanum()
         },
         ErrorKind::AlphaNumeric,
     )
 }
 
+fn host_asterisk(input: &str) -> IResult<&str, Host> {
+    tag("*")(input).and_then(|(next_input, res)| Ok((next_input, Host::ASTERISK)))
+}
+
 // only IPv4
-fn ip(input: &str) -> IResult<&str, [u8; 4]> {
+fn ip(input: &str) -> IResult<&str, Host> {
     tuple((count(terminated(ip_num, tag(".")), 3), ip_num))(input).and_then(|(next_input, res)| {
         let mut result: [u8; 4] = [0, 0, 0, 0];
         res.0
@@ -133,14 +139,14 @@ fn ip(input: &str) -> IResult<&str, [u8; 4]> {
             .enumerate()
             .for_each(|(i, v)| result[i] = v);
         result[3] = res.1;
-        Ok((next_input, result))
+        Ok((next_input, Host::IP(result)))
     })
 }
 
 fn ip_num(input: &str) -> IResult<&str, u8> {
     one_to_three_digits(input).and_then(|(next_input, result)| match result.parse::<u8>() {
         Ok(n) => Ok((next_input, n)),
-        Err(_) => Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))),
+        Err(_) => Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))), // TODO: use https://docs.rs/nom/6.0.0/nom/error/index.html to add error context
     })
 }
 
@@ -151,6 +157,10 @@ fn one_to_three_digits(input: &str) -> IResult<&str, String> {
 
 fn one_digit(input: &str) -> IResult<&str, char> {
     one_of("0123456789")(input)
+}
+
+fn host_ip_or_star(input: &str) -> IResult<&str, Host> {
+    alt((host, ip, host_asterisk))(input)
 }
 
 fn request_method(input: &str) -> IResult<&str, Method> {
@@ -165,7 +175,7 @@ fn request_method(input: &str) -> IResult<&str, Method> {
     ))(input)
     .and_then(|(next_input, res)| Ok((next_input, res.into())))
 }
-
+/// REQUEST LINE: https://tools.ietf.org/html/rfc7230#section-3.1.1
 // fn parse_http(input: &str) -> IResult<&str, Request> {
 //     Ok(("", Request {}))
 // }
@@ -203,17 +213,20 @@ fn test_authority() {
 fn test_host() {
     assert_eq!(
         host("localhost:8080"),
-        Ok((":8080", "localhost".to_string()))
+        Ok((":8080", Host::HOST("localhost".to_string())))
     );
     assert_eq!(
         host("example.org:8080"),
-        Ok((":8080", "example.org".to_string()))
+        Ok((":8080", Host::HOST("example.org".to_string())))
     );
     assert_eq!(
         host("some-subsite.example.org:8080"),
-        Ok((":8080", "some-subsite.example.org".to_string()))
+        Ok((":8080", Host::HOST("some-subsite.example.org".to_string())))
     );
-    assert_eq!(host("example.123"), Ok((".123", "example".to_string())));
+    assert_eq!(
+        host("example.123"),
+        Ok((".123", Host::HOST("example".to_string())))
+    );
     assert_eq!(
         host("$$$.com"),
         Err(NomErr::Error(Error::new(
@@ -229,8 +242,11 @@ fn test_host() {
 
 #[test]
 fn test_ipv4() {
-    assert_eq!(ip("192.168.0.1:8080"), Ok((":8080", [192, 168, 0, 1])));
-    assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", [0, 0, 0, 0])));
+    assert_eq!(
+        ip("192.168.0.1:8080"),
+        Ok((":8080", Host::IP([192, 168, 0, 1])))
+    );
+    assert_eq!(ip("0.0.0.0:8080"), Ok((":8080", Host::IP([0, 0, 0, 0]))));
     assert_eq!(
         ip("1924.168.0.1:8080"),
         Err(NomErr::Error(Error::new("4.168.0.1:8080", ErrorKind::Tag)))
@@ -241,7 +257,7 @@ fn test_ipv4() {
     );
     assert_eq!(
         ip("192.168.0.1444:8080"),
-        Ok(("4:8080", [192, 168, 0, 144]))
+        Ok(("4:8080", Host::IP([192, 168, 0, 144])))
     );
     assert_eq!(
         ip("192.168.0:8080"),
