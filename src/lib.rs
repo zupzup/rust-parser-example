@@ -5,17 +5,19 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take, take_until, take_while},
     character::{
-        complete::{alpha1, alphanumeric0, alphanumeric1, digit1, one_of},
-        is_alphanumeric,
+        complete::{alpha1, alphanumeric0, alphanumeric1, digit1, newline, one_of, space0},
+        is_alphanumeric, is_newline,
     },
     combinator::{cond, opt},
     error::Error,
     error::ErrorKind,
     multi::{count, many0, many1, many_m_n, separated_list1},
-    number::complete::u8 as nom_u8,
-    sequence::{pair, separated_pair, terminated, tuple},
+    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     AsChar, Err as NomErr, IResult, InputTakeAtPosition,
 };
+
+type Header = (String, String);
+type Headers = Vec<Header>;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Method {
@@ -96,8 +98,6 @@ fn authority(input: &str) -> IResult<&str, Option<(&str, Option<&str>)>> {
     ))(input)
 }
 
-// fn host_or_ip(input: &str) -> IResult<&str, String> {}
-
 fn host(input: &str) -> IResult<&str, Host> {
     alt((
         tuple((many1(terminated(alphanumerichyphen1, tag("."))), alpha1)),
@@ -150,8 +150,40 @@ fn ip_num(input: &str) -> IResult<&str, u8> {
     })
 }
 
+fn version(input: &str) -> IResult<&str, &str> {
+    tag("HTTP/1.1")(input)
+}
+
+fn headers(input: &str) -> IResult<&str, Headers> {
+    many0(header)(input)
+}
+
+fn header(input: &str) -> IResult<&str, Header> {
+    separated_pair(
+        alphanumerichyphen1,
+        spaced_colon,
+        terminated(take_while(not_newline), newline),
+    )(input)
+    .and_then(|(next_input, res)| Ok((next_input, (res.0.to_owned(), res.1.to_owned()))))
+}
+
+fn spaced_colon(input: &str) -> IResult<&str, &str> {
+    delimited(space0, tag(":"), space0)(input)
+}
+
+fn not_newline(chr: char) -> bool {
+    chr != '\n'
+}
+
+// TODO: n to m digits
+
 fn one_to_three_digits(input: &str) -> IResult<&str, String> {
     many_m_n(1, 3, one_digit)(input)
+        .and_then(|(next_input, result)| Ok((next_input, result.into_iter().collect())))
+}
+
+fn two_to_four_digits(input: &str) -> IResult<&str, String> {
+    many_m_n(2, 4, one_digit)(input)
         .and_then(|(next_input, result)| Ok((next_input, result.into_iter().collect())))
 }
 
@@ -159,8 +191,21 @@ fn one_digit(input: &str) -> IResult<&str, char> {
     one_of("0123456789")(input)
 }
 
-fn host_ip_or_star(input: &str) -> IResult<&str, Host> {
-    alt((host, ip, host_asterisk))(input)
+fn host_or_ip(input: &str) -> IResult<&str, Host> {
+    alt((host, ip))(input)
+}
+
+fn port(input: &str) -> IResult<&str, u16> {
+    preceded(tag(":"), two_to_four_digits)(input).and_then(|(next_input, res)| {
+        match res.parse::<u16>() {
+            Ok(n) => Ok((next_input, n)),
+            Err(_) => Err(NomErr::Error(Error::new(next_input, ErrorKind::Digit))), // TODO: use https://docs.rs/nom/6.0.0/nom/error/index.html to add error context
+        }
+    })
+}
+
+fn uri(input: &str) -> IResult<&str, URI> {
+    // TODO: optional (optional (scheme, authority, host or ip, port), relative path and query), or *
 }
 
 fn request_method(input: &str) -> IResult<&str, Method> {
@@ -266,5 +311,42 @@ fn test_ipv4() {
     assert_eq!(
         ip("999.168.0.0:8080"),
         Err(NomErr::Error(Error::new(".168.0.0:8080", ErrorKind::Digit)))
+    );
+}
+
+#[test]
+fn test_header() {
+    assert_eq!(
+        header("Content-Type: application/json\nabc"),
+        Ok((
+            "abc",
+            ("Content-Type".to_string(), "application/json".to_string())
+        ))
+    );
+    assert_eq!(
+        header("Content-Type  :          application/json\nabc"),
+        Ok((
+            "abc",
+            ("Content-Type".to_string(), "application/json".to_string())
+        ))
+    );
+    assert_eq!(
+        header("Some1:123$$$%*%*\nabc"),
+        Ok(("abc", ("Some1".to_string(), "123$$$%*%*".to_string())))
+    );
+}
+
+#[test]
+fn test_headers() {
+    assert_eq!(
+        headers("Content-Type: application/json\nAuthorization: pw\nHost: zupzup.org\nabc"),
+        Ok((
+            "abc",
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Authorization".to_string(), "pw".to_string()),
+                ("Host".to_string(), "zupzup.org".to_string())
+            ]
+        ))
     );
 }
