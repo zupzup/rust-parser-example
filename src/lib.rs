@@ -19,6 +19,9 @@ use nom::{
 type Header = (String, String);
 type Headers = Vec<Header>;
 
+type QueryParam = (String, String);
+type QueryParams = Vec<QueryParam>;
+
 #[derive(Debug, PartialEq, Eq)]
 enum Method {
     GET,
@@ -126,6 +129,21 @@ where
     )
 }
 
+// TODO: https://url.spec.whatwg.org/#url-code-points
+fn url_code_points<T>(i: T) -> IResult<T, T>
+where
+    T: InputTakeAtPosition,
+    <T as InputTakeAtPosition>::Item: AsChar,
+{
+    i.split_at_position1_complete(
+        |item| {
+            let char_item = item.as_char();
+            !(char_item == '-') && !char_item.is_alphanum() && !(char_item == '.')
+        },
+        ErrorKind::AlphaNumeric,
+    )
+}
+
 fn host_asterisk(input: &str) -> IResult<&str, Host> {
     tag("*")(input).and_then(|(next_input, res)| Ok((next_input, Host::ASTERISK)))
 }
@@ -204,9 +222,58 @@ fn port(input: &str) -> IResult<&str, u16> {
     })
 }
 
-fn uri(input: &str) -> IResult<&str, URI> {
-    // TODO: optional (optional (scheme, authority, host or ip, port), relative path and query), or *
+fn path(input: &str) -> IResult<&str, String> {
+    tuple((
+        tag("/"),
+        many0(terminated(url_code_points, tag("/"))),
+        opt(url_code_points),
+    ))(input)
+    .and_then(|(next_input, res)| {
+        println!("res: {:?}", res);
+        let mut path = res.0.to_owned();
+        path.push_str(&res.1.join("/"));
+        path.push_str("/");
+        if let Some(last) = res.2 {
+            path.push_str(last);
+        }
+        Ok((next_input, path))
+    })
 }
+
+fn query_params(input: &str) -> IResult<&str, QueryParams> {
+    tuple((
+        tag("?"),
+        alphanumerichyphen1, // TODO: https://infra.spec.whatwg.org/#ascii-code-point
+        tag("="),
+        alphanumerichyphen1,
+        many0(tuple((
+            tag("&"),
+            alphanumerichyphen1,
+            tag("="),
+            alphanumerichyphen1,
+        ))),
+    ))(input)
+    .and_then(|(next_input, res)| {
+        let mut qps = Vec::new();
+
+        qps.push((res.1.to_owned(), res.3.to_owned()));
+
+        for qp in res.4 {
+            qps.push((qp.1.to_owned(), qp.3.to_owned()));
+        }
+
+        Ok((next_input, qps))
+    })
+}
+
+fn fragment(input: &str) -> IResult<&str, &str> {
+    tuple((tag("#"), alphanumerichyphen1))(input)
+        .and_then(|(next_input, res)| Ok((next_input, res.1)))
+}
+
+// fn uri(input: &str) -> IResult<&str, URI> {
+//     // TODO: optional (optional (scheme, authority, host or ip, port), relative path and query), or *
+// }
 
 fn request_method(input: &str) -> IResult<&str, Method> {
     alt((
@@ -349,4 +416,44 @@ fn test_headers() {
             ]
         ))
     );
+}
+
+#[test]
+fn test_path() {
+    assert_eq!(path("/a/b/c?d"), Ok(("?d", "/a/b/c".to_string())));
+    assert_eq!(path("/a/b/c/?d"), Ok(("?d", "/a/b/c/".to_string())));
+    assert_eq!(path("/a/b-c-d/c/?d"), Ok(("?d", "/a/b-c-d/c/".to_string())));
+    assert_eq!(path("/a/1234/c/?d"), Ok(("?d", "/a/1234/c/".to_string())));
+    assert_eq!(
+        path("/a/1234/c.txt?d"),
+        Ok(("?d", "/a/1234/c.txt".to_string()))
+    );
+}
+
+#[test]
+fn test_query_params() {
+    assert_eq!(
+        query_params("?bla=5&blub=val#yay"),
+        Ok((
+            "#yay",
+            vec![
+                ("bla".to_string(), "5".to_string()),
+                ("blub".to_string(), "val".to_string())
+            ]
+        ))
+    );
+
+    assert_eq!(
+        query_params("?bla-blub=arr-arr#yay"),
+        Ok((
+            "#yay",
+            vec![("bla-blub".to_string(), "arr-arr".to_string()),]
+        ))
+    );
+}
+
+#[test]
+fn test_fragmetn() {
+    assert_eq!(fragment("#bla"), Ok(("", "bla")));
+    assert_eq!(fragment("#bla-blub"), Ok(("", "bla-blub")));
 }
